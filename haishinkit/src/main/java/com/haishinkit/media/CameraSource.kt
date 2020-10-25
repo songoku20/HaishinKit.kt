@@ -1,37 +1,37 @@
 package com.haishinkit.media
 
 import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.Context
+import android.content.res.Configuration
+import android.graphics.Point
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.media.MediaCodecInfo
+import android.opengl.GLSurfaceView
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.util.Size
 import android.view.Surface
-import android.view.SurfaceHolder
 import com.haishinkit.BuildConfig
 import com.haishinkit.codec.MediaCodec
 import com.haishinkit.rtmp.RTMPStream
 import org.apache.commons.lang3.builder.ToStringBuilder
 import java.util.concurrent.atomic.AtomicBoolean
 
-private fun gcd(a: Int, b: Int): Int {
-    if (b == 0) return a
-    return gcd(b, a % b)
-}
-
 /**
  * A video source that captures a camera by the Camera2 API.
  */
-class CameraSource(private val manager: CameraManager) : VideoSource {
+class CameraSource(private val activity: Activity) : VideoSource {
     var device: CameraDevice? = null
         private set(value) {
             device?.close()
             field = value
+            startRunning()
         }
     var cameraId: String = DEFAULT_CAMERA_ID
         private set
@@ -47,9 +47,7 @@ class CameraSource(private val manager: CameraManager) : VideoSource {
                 stream?.renderer?.startRunning()
             }
         }
-    val sensorOrientation
-        get() = characteristics?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
-
+    internal var surface: Surface? = null
     override var stream: RTMPStream? = null
         set(value) {
             field = value
@@ -64,29 +62,45 @@ class CameraSource(private val manager: CameraManager) : VideoSource {
             stream?.videoSetting?.height = value.height
         }
     private var request: CaptureRequest.Builder? = null
-        set(value) {
-            request?.let { request ->
-                _surface?.let { surface ->
-                    request.removeTarget(surface)
-                }
-            }
-            field = value
-        }
-    private var _surface: Surface? = null
-    private var surface: Surface?
-        get() {
-            if (_surface == null) {
-                _surface = stream?.videoCodec?.createInputSurface()
-            }
-            return _surface
-        }
-        set(value) {
-            _surface = value
-        }
+    private var isPortraitMode: Boolean = false
+    private var manager: CameraManager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val backgroundHandler by lazy {
         val thread = HandlerThread(javaClass.name)
         thread.start()
         Handler(thread.looper)
+    }
+    val orientation: Int
+        get() {
+            return when (activity.windowManager.defaultDisplay.rotation) {
+                Surface.ROTATION_0 -> if (isPortraitMode) ROTATION_270 else ROTATION_0
+                Surface.ROTATION_90 -> if (isPortraitMode) ROTATION_0 else ROTATION_90
+                Surface.ROTATION_180 -> if (isPortraitMode) ROTATION_90 else ROTATION_180
+                Surface.ROTATION_270 -> if (isPortraitMode) ROTATION_180 else ROTATION_270
+                else -> 0
+            }
+        }
+
+    var mCameraSize = Size(640, 480)
+    val size: Size
+        get() {
+            val displaySize = Point()
+            activity.windowManager.defaultDisplay.getSize(displaySize)
+            return if (displaySize.x > displaySize.y) {
+                val scale = displaySize.y.toDouble() / mCameraSize.height.toDouble()
+                Size((scale * mCameraSize.width).toInt(), (scale * mCameraSize.height).toInt())
+            } else {
+                val scale = displaySize.x.toDouble() / mCameraSize.height.toDouble()
+                Size((scale * mCameraSize.height).toInt(), (scale * mCameraSize.width).toInt())
+            }
+        }
+
+    init {
+        val orientation = activity.windowManager.defaultDisplay.rotation
+        isPortraitMode = if (activity.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT) {
+            (orientation == Surface.ROTATION_0 || orientation == Surface.ROTATION_180)
+        } else {
+            (orientation == Surface.ROTATION_90 || orientation == Surface.ROTATION_270)
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -100,9 +114,11 @@ class CameraSource(private val manager: CameraManager) : VideoSource {
                     this@CameraSource.device = camera
                     this@CameraSource.setUp()
                 }
+
                 override fun onDisconnected(camera: CameraDevice) {
                     this@CameraSource.device = null
                 }
+
                 override fun onError(camera: CameraDevice, error: Int) {
                     Log.w(TAG, error.toString())
                 }
@@ -122,20 +138,14 @@ class CameraSource(private val manager: CameraManager) : VideoSource {
     }
 
     override fun startRunning() {
+        Log.d(TAG, "${this::startRunning.name}: $device, $surface")
         if (isRunning.get()) { return }
         val device = device ?: return
         val surface = surface ?: return
-        val rendererSurface = stream?.renderer?.holder?.surface
         request = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
             this.addTarget(surface)
-            if (rendererSurface != null) {
-                this.addTarget(rendererSurface)
-            }
         }
         val surfaceList = mutableListOf<Surface>(surface)
-        if (rendererSurface != null) {
-            surfaceList.add(rendererSurface)
-        }
         device.createCaptureSession(
             surfaceList,
             object : CameraCaptureSession.StateCallback() {
@@ -151,51 +161,43 @@ class CameraSource(private val manager: CameraManager) : VideoSource {
             backgroundHandler
         )
         isRunning.set(true)
+        if (BuildConfig.DEBUG) {
+            Log.d(TAG, this::startRunning.name)
+        }
     }
 
     override fun stopRunning() {
         if (!isRunning.get()) { return }
         isRunning.set(false)
+        if (BuildConfig.DEBUG) {
+            Log.d(TAG, this::startRunning.name)
+        }
+    }
+
+    override fun createGLSurfaceViewRenderer(): GLSurfaceView.Renderer? {
+        return CameraSourceRenderer(this)
     }
 
     override fun toString(): String {
         return ToStringBuilder.reflectionToString(this)
     }
 
-    internal fun getPreviewSize(): Size {
-        val previewSizes = characteristics
-            ?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            ?.getOutputSizes(SurfaceHolder::class.java) ?: return Size(0, 0)
-        var result: Size? = null
-        for (previewSize in previewSizes) {
-            val gcd = gcd(previewSize.width, previewSize.height)
-            val width = previewSize.width / gcd
-            val height = previewSize.height / gcd
-            if ((height == ASPECT_VERTICAL && width == ASPECT_HORIZONTAL) || (width == ASPECT_VERTICAL && height == ASPECT_HORIZONTAL)) {
-                if (result == null) {
-                    result = previewSize
-                } else {
-                    if (result.height < previewSize.height && result.width < previewSize.width) {
-                        result = previewSize
-                    }
-                }
-            }
-        }
-        if (BuildConfig.DEBUG) {
-            Log.d(TAG, "$result, list=${ToStringBuilder.reflectionToString(previewSizes)}")
-        }
-        return result ?: previewSizes[0]
+    internal fun getSize(outSize: Point) {
+        activity.windowManager.defaultDisplay.getSize(outSize)
     }
 
     companion object {
         const val DEFAULT_WIDTH: Int = 640
         const val DEFAULT_HEIGHT: Int = 480
 
+        const val ROTATION_0 = 0
+        const val ROTATION_90 = 1
+        const val ROTATION_180 = 2
+        const val ROTATION_270 = 3
+
         private const val DEFAULT_CAMERA_ID: String = "0"
         private const val MAX_PREVIEW_WIDTH: Int = 1920
         private const val MAX_PREVIEW_HEIGHT: Int = 1080
-        private const val ASPECT_VERTICAL = 16
-        private const val ASPECT_HORIZONTAL = 9
 
         private val TAG = CameraSource::class.java.simpleName
     }

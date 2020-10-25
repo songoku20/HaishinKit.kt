@@ -138,9 +138,7 @@ internal abstract class MediaCodec(private val mime: String) : Running {
         outputFormat = null
     }
 
-    protected abstract fun createOutputFormat(): MediaFormat
-
-    private fun configure(codec: MediaCodec) {
+    open fun configure(codec: MediaCodec) {
         if (callback != null) {
             callback?.listener = listener
             if (Build.VERSION_CODES.M <= Build.VERSION.SDK_INT) {
@@ -151,6 +149,8 @@ internal abstract class MediaCodec(private val mime: String) : Running {
         }
         codec.configure(createOutputFormat(), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
     }
+
+    protected abstract fun createOutputFormat(): MediaFormat
 
     override fun toString(): String {
         return ToStringBuilder.reflectionToString(this)

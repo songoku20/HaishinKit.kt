@@ -1,5 +1,6 @@
 package com.haishinkit.media
 
+import android.opengl.GLSurfaceView
 import android.util.Size
 
 /**
@@ -7,4 +8,8 @@ import android.util.Size
  */
 interface VideoSource : Source {
     var resolution: Size
+
+    fun createGLSurfaceViewRenderer(): GLSurfaceView.Renderer? {
+        return null
+    }
 }
